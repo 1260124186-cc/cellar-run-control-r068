@@ -76,6 +76,41 @@ func (s *Service) SetFormulaSteps(
 	return updated, nil
 }
 
+func (s *Service) BindFormulaProcessConfig(
+	id string,
+	input BindFormulaConfigInput,
+) (domain.Formula, error) {
+	var updated domain.Formula
+	err := s.store.Execute(func(snapshot *domain.Snapshot) error {
+		formula, ok := snapshot.Formulas[id]
+		if !ok {
+			return domain.NewError(domain.CodeFormulaNotFound, "formula was not found")
+		}
+		if err := s.checkExpected(formula.Version, input.ExpectedVersion); err != nil {
+			return err
+		}
+		config, ok := snapshot.ProcessConfigs[input.ProcessConfigID]
+		if !ok {
+			return domain.NewError(domain.CodeProcessConfigNotFound,
+				"process configuration was not found")
+		}
+		if config.State != domain.ProcessConfigActive {
+			return domain.NewError(domain.CodeProcessConfigState,
+				"only an active process configuration can be selected")
+		}
+		if err := formula.SelectProcessConfig(config.ID); err != nil {
+			return err
+		}
+		snapshot.Formulas[id] = formula.Clone()
+		updated = formula.Clone()
+		return nil
+	})
+	if err != nil {
+		return domain.Formula{}, err
+	}
+	return updated, nil
+}
+
 func (s *Service) ApproveFormula(id string, input VersionInput) (domain.Formula, error) {
 	var updated domain.Formula
 	err := s.store.Execute(func(snapshot *domain.Snapshot) error {
@@ -89,7 +124,16 @@ func (s *Service) ApproveFormula(id string, input VersionInput) (domain.Formula,
 		if err := formula.Approve(s.clock.Now()); err != nil {
 			return err
 		}
-		snapshot.Formulas[id] = formula
+		config, ok := snapshot.ProcessConfigs[*formula.ProcessConfigID]
+		if !ok {
+			return domain.NewError(domain.CodeProcessConfigNotFound,
+				"selected process configuration was not found")
+		}
+		if !config.HasActiveRevision(s.clock.Now()) {
+			return domain.NewError(domain.CodeProcessConfigNotEffective,
+				"selected process configuration has no published revision available for new runs")
+		}
+		snapshot.Formulas[id] = formula.Clone()
 		updated = formula.Clone()
 		return nil
 	})

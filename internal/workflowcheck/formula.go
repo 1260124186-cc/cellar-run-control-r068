@@ -32,6 +32,11 @@ func formulaApproval(api *client) error {
 		return err
 	}
 
+	config, err := ensureProcessConfig(api, "Approval Gate Config")
+	if err != nil {
+		return err
+	}
+
 	updatedResponse, err := api.call("PUT", "/v1/formulas/"+formula.ID+"/steps",
 		formulaStepPayload(), ptrInt64(1))
 	if err != nil {
@@ -47,6 +52,43 @@ func formulaApproval(api *client) error {
 		return fmt.Errorf("formula steps were not accepted as one revision")
 	}
 
+	// Approval must fail once steps exist but no configuration is selected.
+	unboundResponse, err := api.call("POST", "/v1/formulas/"+formula.ID+"/approve",
+		nil, ptrInt64(2))
+	if err != nil {
+		return err
+	}
+	if err := requireCode(unboundResponse, 409, string(domain.CodeProcessConfigUnbound),
+		"approve without process config"); err != nil {
+		return err
+	}
+
+	// Binding a missing configuration series must fail without partial writes.
+	missingBind, err := api.call("PUT", "/v1/formulas/"+formula.ID+"/process-config",
+		map[string]any{"process_config_id": "pconf_doesnotexist"}, ptrInt64(2))
+	if err != nil {
+		return err
+	}
+	if err := requireCode(missingBind, 404, string(domain.CodeProcessConfigNotFound),
+		"bind missing process config"); err != nil {
+		return err
+	}
+
+	bindResponse, err := api.call("PUT", "/v1/formulas/"+formula.ID+"/process-config",
+		map[string]any{"process_config_id": config.ID}, ptrInt64(2))
+	if err != nil {
+		return err
+	}
+	if err := requireStatus(bindResponse, 200, "bind process config"); err != nil {
+		return err
+	}
+	if err := bindResponse.decode(&formula); err != nil {
+		return err
+	}
+	if formula.Version != 3 {
+		return fmt.Errorf("process config binding did not produce revision 3")
+	}
+
 	duplicate, err := api.call("POST", "/v1/formulas",
 		createFormulaPayload("  current   pale  "), nil)
 	if err != nil {
@@ -57,7 +99,7 @@ func formulaApproval(api *client) error {
 		return err
 	}
 
-	approvedResponse, err := api.call("POST", "/v1/formulas/"+formula.ID+"/approve", nil, ptrInt64(2))
+	approvedResponse, err := api.call("POST", "/v1/formulas/"+formula.ID+"/approve", nil, ptrInt64(3))
 	if err != nil {
 		return err
 	}
@@ -67,7 +109,7 @@ func formulaApproval(api *client) error {
 	if err := approvedResponse.decode(&formula); err != nil {
 		return err
 	}
-	if formula.State != domain.FormulaApproved || formula.Version != 3 {
+	if formula.State != domain.FormulaApproved || formula.Version != 4 {
 		return fmt.Errorf("approved formula has unexpected state or version")
 	}
 
@@ -86,7 +128,7 @@ func formulaApproval(api *client) error {
 		return fmt.Errorf("approved formula was not readable")
 	}
 
-	repeated, err := api.call("POST", "/v1/formulas/"+formula.ID+"/approve", nil, ptrInt64(3))
+	repeated, err := api.call("POST", "/v1/formulas/"+formula.ID+"/approve", nil, ptrInt64(4))
 	if err != nil {
 		return err
 	}
@@ -98,6 +140,10 @@ func formulaApproval(api *client) error {
 }
 
 func ensureApprovedFormula(api *client, name string) (formulaView, error) {
+	config, err := ensureProcessConfig(api, "Config for "+name)
+	if err != nil {
+		return formulaView{}, err
+	}
 	createdResponse, err := api.call("POST", "/v1/formulas", createFormulaPayload(name), nil)
 	if err != nil {
 		return formulaView{}, err
@@ -109,23 +155,17 @@ func ensureApprovedFormula(api *client, name string) (formulaView, error) {
 	if err := createdResponse.decode(&formula); err != nil {
 		return formulaView{}, err
 	}
-	stepsResponse, err := api.call("PUT", "/v1/formulas/"+formula.ID+"/steps",
-		formulaStepPayload(), ptrInt64(1))
+	if err := approveFormulaWithConfig(api, formula.ID, config.ID); err != nil {
+		return formulaView{}, err
+	}
+	readResponse, err := api.call("GET", "/v1/formulas/"+formula.ID, nil, nil)
 	if err != nil {
 		return formulaView{}, err
 	}
-	if err := requireStatus(stepsResponse, 200, "set setup steps"); err != nil {
+	if err := requireStatus(readResponse, 200, "read approved setup formula"); err != nil {
 		return formulaView{}, err
 	}
-	approveResponse, err := api.call("POST", "/v1/formulas/"+formula.ID+"/approve",
-		nil, ptrInt64(2))
-	if err != nil {
-		return formulaView{}, err
-	}
-	if err := requireStatus(approveResponse, 200, "approve setup formula"); err != nil {
-		return formulaView{}, err
-	}
-	if err := approveResponse.decode(&formula); err != nil {
+	if err := readResponse.decode(&formula); err != nil {
 		return formulaView{}, err
 	}
 	return formula, nil

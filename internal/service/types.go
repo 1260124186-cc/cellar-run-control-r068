@@ -21,6 +21,30 @@ type SetFormulaStepsInput struct {
 	Steps           []domain.FormulaStep
 }
 
+type BindFormulaConfigInput struct {
+	ExpectedVersion *int64
+	ProcessConfigID string
+}
+
+type CreateProcessConfigInput struct {
+	Name   string
+	Season string
+	Style  string
+	Notes  string
+}
+
+type PublishRevisionInput struct {
+	ExpectedVersion *int64
+	Profile         domain.ProcessProfile
+	EffectiveAt     time.Time
+	PublishedBy     string
+}
+
+type WithdrawRevisionInput struct {
+	ExpectedVersion *int64
+	Reason          string
+}
+
 type VersionInput struct {
 	ExpectedVersion *int64
 }

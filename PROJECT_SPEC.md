@@ -22,12 +22,40 @@ deferred to a later engineering task.
 
 ## Entities
 
+### ProcessConfig
+
+A process configuration series contains an identifier, normalized name,
+optional season and style labels, notes, lifecycle state, ordered immutable
+revisions, version, and timestamps.
+
+Series states are `active` and `retired`.
+
+- Names are unique after case folding and whitespace normalization.
+- A revision carries the complete `ProcessProfile`: inclusive fermentation and
+  observation temperature bands (the observation band must contain the
+  fermentation band), minimum and maximum planned days (1 to 120), the minimum
+  observation counts for conditioning and completion (the completion minimum
+  cannot be lower than the conditioning minimum), the maximum permitted
+  gravity rise, and a non-negative final gravity tolerance.
+- Each revision has a revision number starting at 1, an `effective_at` time
+  unique within the series, the publishing supervisor, and a publish time.
+- Publishing a revision appends it; revisions are never edited in place.
+- Revision numbers are assigned under the serialized snapshot write lock, so
+  concurrent publishes receive contiguous numbers without duplicates.
+- A revision can be withdrawn once with a reason. Withdrawal only removes the
+  revision from future resolution; runs already bound to it keep their
+  snapshot. A withdrawn revision cannot be withdrawn again.
+- An active series can be retired, after which it cannot publish revisions.
+- Effective resolution at a given time selects the non-withdrawn revision with
+  the greatest `effective_at` not in the future, breaking ties by highest
+  revision number.
+
 ### Formula
 
 A formula contains an identifier, normalized name, style label, target original
 gravity, target final gravity, maximum fermentation temperature, minimum and
-maximum planned days, ordered process steps, lifecycle state, version, and
-timestamps.
+maximum planned days, ordered process steps, the selected process configuration
+series, lifecycle state, version, and timestamps.
 
 States are `draft`, `approved`, and `retired`.
 
@@ -42,6 +70,9 @@ States are `draft`, `approved`, and `retired`.
 - Step temperatures are in the inclusive range 5 to 90 Celsius.
 - Step hold times are 1 to 1440 minutes.
 - `draft -> approved` requires a complete valid step list.
+- A draft formula must select a process configuration series before approval;
+  the selected series must have at least one non-withdrawn revision at approval
+  time. The selection is immutable after approval.
 - An approved formula is immutable.
 - `approved -> retired` is allowed only when no run currently uses it.
 
@@ -64,20 +95,37 @@ States are `available`, `reserved`, `in_use`, `cleaning`, and `retired`.
 ### FermentationRun
 
 A run contains an identifier, unique run code, an approved formula identifier,
-an optional vessel identifier, planned volume, notes, lifecycle state,
-timetable, ordered observations, final metrics, version, and timestamps.
+the selected process configuration series identifier, an optional vessel
+identifier, planned volume, notes, lifecycle state, timetable, ordered
+observations, the process configuration binding snapshot, final metrics, a
+completion-time process evaluation, version, and timestamps.
 
 States are `planned`, `reserved`, `fermenting`, `conditioning`, `completed`,
 and `aborted`.
 
 - Planned volume is greater than zero and cannot exceed vessel capacity.
-- Only an approved formula may be attached to a run.
+- Only an approved formula may be attached to a run; the run copies the
+  formula's selected process configuration series at creation.
 - `planned -> reserved` atomically reserves an available vessel.
-- `reserved -> fermenting` requires that the vessel still belongs to the run.
-- `fermenting -> conditioning` requires at least two observations.
-- `conditioning -> completed` requires at least three observations.
+- `reserved -> fermenting` requires that the vessel still belongs to the run
+  and that the selected series has an effective, non-withdrawn revision at that
+  instant. The resolved revision and its full profile are snapshotted onto the
+  run together with every candidate revision and its selection status.
+- Observation temperature band, gravity-rise limit, conditioning observation
+  minimum, completion observation minimum, and planned day window are read from
+  the run's snapshotted profile. Later publishes, withdrawals, and series
+  retirement cannot change an already started or finished run.
+- `fermenting -> conditioning` requires the bound profile's conditioning
+  observation minimum.
+- `conditioning -> completed` requires the bound profile's completion
+  observation minimum.
 - Completion computes apparent attenuation and estimated alcohol by volume from
-  the formula target original gravity and the last observation.
+  the formula target original gravity and the last observation, and records a
+  process evaluation against the bound revision: final gravity tolerance,
+  elapsed duration versus the bound day window, observation count, and whether
+  the bound revision has since been withdrawn.
+- If no revision is effective at start, the transition fails with
+  `process_config_not_effective` without changing vessel or run state.
 - Completion moves the vessel to cleaning without losing its run association.
 - A non-completed run can be aborted. Aborting before fermentation releases an
   available vessel; aborting after fermentation schedules the vessel for
@@ -105,12 +153,15 @@ Public entry points are:
 
 - `POST /v1/formulas`
 - `PUT /v1/formulas/{id}/steps`
+- `PUT /v1/formulas/{id}/process-config`
 - `POST /v1/formulas/{id}/approve`
 - `GET /v1/formulas/{id}`
 
-The client creates a draft, sets its process step list atomically, approves it,
-and reads the approved record. Invalid ranges, duplicate names, empty steps,
-and repeated approval return stable error codes without partial writes.
+The client creates a draft, sets its process step list atomically, selects a
+process configuration series, approves it, and reads the approved record.
+Invalid ranges, duplicate names, empty steps, a missing or retired selected
+configuration, and repeated approval return stable error codes without partial
+writes.
 
 This path crosses HTTP protocol handling, application orchestration, domain
 rules, and snapshot storage.
@@ -126,9 +177,11 @@ Public entry points are:
 - `GET /v1/runs/{id}`
 
 The client registers a vessel, creates a planned run against an approved
-formula, reserves the vessel, starts fermentation, and reads the run. Capacity
-conflicts, an unavailable vessel, duplicate run codes, and stale versions
-produce stable failures without changing vessel or run state.
+formula, reserves the vessel, starts fermentation, and reads the run. At start
+the service resolves and snapshots the effective process configuration
+revision. Capacity conflicts, an unavailable vessel, duplicate run codes,
+stale versions, and the absence of an effective revision produce stable
+failures without changing vessel or run state.
 
 This path crosses HTTP protocol handling, application orchestration, domain
 rules, storage coordination, and resource lifecycle.
@@ -142,13 +195,37 @@ Public entry points are:
 - `POST /v1/runs/{id}/complete`
 - `GET /v1/runs/{id}`
 
-The client appends three ordered observations, starts conditioning, completes
-the run, and reads the calculated result. Non-monotonic times, rising gravity,
-out-of-range values, excessive sequences, incomplete data, and repeated
-transitions return stable failures without changing persisted state.
+The client appends ordered observations, starts conditioning, completes the
+run, and reads the calculated result together with the bound-revision
+evaluation. Non-monotonic times, rising gravity, out-of-range values,
+excessive sequences, incomplete data, and repeated transitions return stable
+failures without changing persisted state. Every threshold comes from the
+revision snapshotted at start, so subsequent configuration publishes and
+withdrawals never affect the run.
 
 This path crosses HTTP protocol handling, application orchestration, numeric
 domain rules, and snapshot storage.
+
+### 4. Process Configuration Versioning
+
+Public entry points are:
+
+- `POST /v1/process-configs`
+- `GET /v1/process-configs`
+- `GET /v1/process-configs/{id}`
+- `POST /v1/process-configs/{id}/revisions`
+- `POST /v1/process-configs/{id}/revisions/{revision}/withdraw`
+- `POST /v1/process-configs/{id}/retire`
+
+A planner creates a series, publishes timestamped revisions (possibly with
+supervisors publishing concurrently), optionally withdraws a flawed revision,
+and retires the series. Runs started around an effective-time boundary bind
+different revisions while keeping immutable snapshots; the run read view
+reports which revision each run uses, whether it has since been withdrawn, and
+why each candidate revision was or was not selected.
+
+This path crosses HTTP protocol handling, application orchestration, immutable
+revision resolution, concurrency serialization, and snapshot storage.
 
 ## Modules
 
@@ -210,13 +287,14 @@ task owns systematic tests for validation boundaries, state transitions,
 numeric calculations, stale revisions, storage failures, and concurrent
 reservation attempts.
 
-The current build command is `go build ./...`. Three bounded production checks
+The current build command is `go build ./...`. Four bounded production checks
 start the real HTTP handler, issue real JSON requests, check success and failure
 behavior, and exit without external services:
 
 - `go run ./cmd/fermentctl check formula-approval`
 - `go run ./cmd/fermentctl check vessel-run-lifecycle`
 - `go run ./cmd/fermentctl check observations-completion`
+- `go run ./cmd/fermentctl check process-config-versioning`
 
 ## Scope Limits
 

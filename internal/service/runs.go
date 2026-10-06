@@ -2,6 +2,8 @@ package service
 
 import (
 	"sort"
+	"strconv"
+	"time"
 
 	"github.com/1260124186-cc/solo-0016-cellar-run-control/internal/domain"
 )
@@ -45,6 +47,11 @@ func (s *Service) CreateRun(input CreateRunInput) (domain.FermentationRun, error
 			return domain.NewError(domain.CodeFormulaState,
 				"run requires an approved formula")
 		}
+		if formula.ProcessConfigID == nil || *formula.ProcessConfigID == "" {
+			return domain.NewError(domain.CodeProcessConfigUnbound,
+				"approved formula has no bound process configuration")
+		}
+		run.ProcessConfigID = *formula.ProcessConfigID
 		if _, exists := snapshot.RunIndex[run.Code]; exists {
 			return domain.NewError(domain.CodeRunConflict,
 				"a run with the same code already exists")
@@ -116,14 +123,38 @@ func (s *Service) StartRun(
 		if run.VesselID == nil {
 			return domain.NewError(domain.CodeRunState, "run has no vessel")
 		}
+		config, ok := snapshot.ProcessConfigs[run.ProcessConfigID]
+		if !ok {
+			return domain.NewError(domain.CodeProcessConfigNotFound,
+				"bound process configuration was not found")
+		}
+		if config.State != domain.ProcessConfigActive {
+			return domain.NewError(domain.CodeProcessConfigState,
+				"bound process configuration series has been retired")
+		}
+		now := s.clock.Now()
+		revision, candidates, err := domain.ResolveEffective(config, now)
+		if err != nil {
+			return err
+		}
+		binding := domain.RunProcessBinding{
+			ProcessConfigID:   config.ID,
+			ProcessConfigName: config.Name,
+			Revision:          revision.Revision,
+			EffectiveAt:       revision.EffectiveAt,
+			PublishedAt:       revision.PublishedAt,
+			ResolutionReason:  domain.ResolutionLatestEffective,
+			Profile:           revision.Profile,
+			Candidates:        candidates,
+		}
 		vessel, ok := snapshot.Vessels[*run.VesselID]
 		if !ok {
 			return domain.NewError(domain.CodeVesselNotFound, "vessel was not found")
 		}
-		if err := vessel.StartRun(run.ID, s.clock.Now()); err != nil {
+		if err := vessel.StartRun(run.ID, now); err != nil {
 			return err
 		}
-		if err := run.StartFermentation(s.clock.Now()); err != nil {
+		if err := run.StartFermentation(binding, now); err != nil {
 			return err
 		}
 		snapshot.Runs[id] = run.Clone()
@@ -181,39 +212,133 @@ func (s *Service) AbortRun(
 	return updatedRun, updatedVessel, nil
 }
 
-func (s *Service) GetRun(id string) (domain.FermentationRun, error) {
-	var found domain.FermentationRun
+// RunProcessStatus explains which configuration revision a run is judged by
+// and whether that revision is still available in the catalogue. It is
+// derived at read time; the run's own binding snapshot is never rewritten.
+type RunProcessStatus struct {
+	Bound                  bool   `json:"bound"`
+	ProcessConfigID        string `json:"process_config_id,omitempty"`
+	ProcessConfigName      string `json:"process_config_name,omitempty"`
+	Revision               int64  `json:"revision,omitempty"`
+	EffectiveAt            string `json:"effective_at,omitempty"`
+	ResolutionReason       string `json:"resolution_reason,omitempty"`
+	BoundRevisionWithdrawn bool   `json:"bound_revision_withdrawn"`
+	ConfigSeriesRetired    bool   `json:"config_series_retired"`
+	PendingConfigID        string `json:"pending_config_id,omitempty"`
+	PendingConfigName      string `json:"pending_config_name,omitempty"`
+	PendingEffective       bool   `json:"pending_effective_revision"`
+	Summary                string `json:"summary"`
+}
+
+// RunView pairs the stored run aggregate with its derived configuration
+// status. The embedded run is returned unchanged so clients keep one shape.
+type RunView struct {
+	domain.FermentationRun
+	ProcessStatus RunProcessStatus `json:"process_status"`
+}
+
+func (s *Service) GetRun(id string) (RunView, error) {
+	var view RunView
 	err := s.store.View(func(snapshot domain.Snapshot) error {
 		run, ok := snapshot.Runs[id]
 		if !ok {
 			return domain.NewError(domain.CodeRunNotFound, "run was not found")
 		}
-		found = run.Clone()
+		view = s.buildRunView(snapshot, run)
 		return nil
 	})
 	if err != nil {
-		return domain.FermentationRun{}, err
+		return RunView{}, err
 	}
-	return found, nil
+	return view, nil
 }
 
-func (s *Service) ListRuns() ([]domain.FermentationRun, error) {
-	var runs []domain.FermentationRun
+func (s *Service) ListRuns() ([]RunView, error) {
+	var views []RunView
 	err := s.store.View(func(snapshot domain.Snapshot) error {
-		runs = make([]domain.FermentationRun, 0, len(snapshot.Runs))
+		views = make([]RunView, 0, len(snapshot.Runs))
 		for _, run := range snapshot.Runs {
-			runs = append(runs, run.Clone())
+			views = append(views, s.buildRunView(snapshot, run))
 		}
 		return nil
 	})
 	if err != nil {
 		return nil, err
 	}
-	sort.Slice(runs, func(i, j int) bool {
-		if runs[i].Code == runs[j].Code {
-			return runs[i].ID < runs[j].ID
+	sort.Slice(views, func(i, j int) bool {
+		if views[i].Code == views[j].Code {
+			return views[i].ID < views[j].ID
 		}
-		return runs[i].Code < runs[j].Code
+		return views[i].Code < views[j].Code
 	})
-	return runs, nil
+	return views, nil
+}
+
+func (s *Service) buildRunView(snapshot domain.Snapshot, run domain.FermentationRun) RunView {
+	now := s.clock.Now().UTC()
+	status := RunProcessStatus{}
+	if run.ProcessBinding != nil {
+		binding := run.ProcessBinding
+		status.Bound = true
+		status.ProcessConfigID = binding.ProcessConfigID
+		status.ProcessConfigName = binding.ProcessConfigName
+		status.Revision = binding.Revision
+		status.EffectiveAt = binding.EffectiveAt.UTC().Format(time.RFC3339)
+		status.ResolutionReason = binding.ResolutionReason
+		status.Summary = "governed by revision " +
+			strconv.FormatInt(binding.Revision, 10) + " of " + binding.ProcessConfigName +
+			", bound at start; thresholds are snapshotted and immutable"
+		if config, ok := snapshot.ProcessConfigs[binding.ProcessConfigID]; ok {
+			if config.State == domain.ProcessConfigRetired {
+				status.ConfigSeriesRetired = true
+			}
+			if int(binding.Revision) <= len(config.Revisions) &&
+				config.Revisions[binding.Revision-1].Withdrawn(now) {
+				status.BoundRevisionWithdrawn = true
+				status.Summary += "; the bound revision has since been withdrawn, but this run keeps its snapshot"
+			}
+		} else {
+			status.Summary += "; the configuration series was removed from the catalogue"
+		}
+	} else if run.ProcessConfigID != "" {
+		status.PendingConfigID = run.ProcessConfigID
+		if config, ok := snapshot.ProcessConfigs[run.ProcessConfigID]; ok {
+			status.PendingConfigName = config.Name
+			if _, _, err := domain.ResolveEffective(config, now); err != nil {
+				status.Summary = "not started; no revision of " + config.Name +
+					" is currently effective"
+			} else {
+				status.PendingEffective = true
+				if next := nextFutureRevision(config, now); next != nil {
+					status.Summary = "not started; will resolve against the latest revision of " +
+						config.Name + " effective at start; revision " +
+						strconv.FormatInt(next.Revision, 10) + " becomes effective " +
+						next.EffectiveAt.UTC().Format(time.RFC3339)
+				} else {
+					status.Summary = "not started; will resolve against the latest revision of " +
+						config.Name + " effective at start"
+				}
+			}
+		} else {
+			status.Summary = "not started; bound configuration series is missing"
+		}
+	} else {
+		status.Summary = "run predates process configuration binding"
+	}
+	return RunView{FermentationRun: run.Clone(), ProcessStatus: status}
+}
+
+func nextFutureRevision(config domain.ProcessConfig, now time.Time) *domain.ProcessConfigRevision {
+	var next *domain.ProcessConfigRevision
+	for index := range config.Revisions {
+		revision := config.Revisions[index]
+		if revision.Withdrawn(now) || !revision.EffectiveAt.After(now) {
+			continue
+		}
+		if next == nil || revision.EffectiveAt.Before(next.EffectiveAt) {
+			candidate := revision
+			next = &candidate
+		}
+	}
+	return next
 }

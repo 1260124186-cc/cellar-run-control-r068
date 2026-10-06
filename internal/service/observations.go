@@ -79,7 +79,16 @@ func (s *Service) CompleteRun(
 		if !ok {
 			return domain.NewError(domain.CodeFormulaNotFound, "attached formula was not found")
 		}
-		if err := run.Complete(formula.TargetOriginalGravity, s.clock.Now()); err != nil {
+		boundWithdrawn := false
+		if run.ProcessBinding != nil {
+			if config, ok := snapshot.ProcessConfigs[run.ProcessBinding.ProcessConfigID]; ok &&
+				int(run.ProcessBinding.Revision) <= len(config.Revisions) {
+				boundWithdrawn = config.Revisions[run.ProcessBinding.Revision-1].
+					Withdrawn(s.clock.Now())
+			}
+		}
+		if err := run.Complete(formula.TargetOriginalGravity, formula.TargetFinalGravity,
+			boundWithdrawn, s.clock.Now()); err != nil {
 			return err
 		}
 		if run.VesselID == nil {

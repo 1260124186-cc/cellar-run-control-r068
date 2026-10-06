@@ -9,6 +9,7 @@ import (
 func NewHandler(app *service.Service) http.Handler {
 	mux := http.NewServeMux()
 	registerFormulaRoutes(mux, app)
+	registerProcessConfigRoutes(mux, app)
 	registerVesselRoutes(mux, app)
 	registerRunRoutes(mux, app)
 	mux.HandleFunc("GET /healthz", func(response http.ResponseWriter, _ *http.Request) {

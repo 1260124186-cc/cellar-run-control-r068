@@ -23,6 +23,14 @@ const (
 	CodeObservationConflict Code = "observation_conflict"
 	CodeRevisionConflict    Code = "revision_conflict"
 	CodeStorage             Code = "storage_error"
+
+	CodeProcessConfigNotFound     Code = "process_config_not_found"
+	CodeProcessConfigNameConflict Code = "process_config_name_conflict"
+	CodeProcessConfigState        Code = "invalid_process_config_state"
+	CodeProcessConfigRevision     Code = "invalid_process_config_revision"
+	CodeProcessConfigRevNotFound  Code = "process_config_revision_not_found"
+	CodeProcessConfigNotEffective Code = "process_config_not_effective"
+	CodeProcessConfigUnbound      Code = "process_config_unbound"
 )
 
 type Error struct {

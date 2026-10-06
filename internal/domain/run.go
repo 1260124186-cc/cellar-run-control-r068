@@ -13,21 +13,65 @@ const (
 	RunAborted      RunState = "aborted"
 )
 
+// RunProcessBinding is snapshotted onto the run at start. It captures the
+// exact configuration revision that was resolved then, including the full
+// threshold profile, so later publishes or withdrawals cannot change what a
+// live or completed run is judged against.
+type RunProcessBinding struct {
+	ProcessConfigID   string              `json:"process_config_id"`
+	ProcessConfigName string              `json:"process_config_name"`
+	Revision          int64               `json:"revision"`
+	EffectiveAt       time.Time           `json:"effective_at"`
+	PublishedAt       time.Time           `json:"published_at"`
+	ResolvedAt        time.Time           `json:"resolved_at"`
+	ResolutionReason  string              `json:"resolution_reason"`
+	Profile           ProcessProfile      `json:"profile"`
+	Candidates        []RevisionCandidate `json:"candidates"`
+	ExpectedEarliest  time.Time           `json:"expected_completion_earliest"`
+	ExpectedLatest    time.Time           `json:"expected_completion_latest"`
+}
+
+// RunProcessResult records the completion-time evaluation performed against
+// the bound revision, so every finished run shows why it passed.
+type RunProcessResult struct {
+	FinalGravity                float64 `json:"final_gravity"`
+	TargetFinalGravity          float64 `json:"target_final_gravity"`
+	FinalGravityTolerance       float64 `json:"final_gravity_tolerance"`
+	FinalGravityWithinTolerance bool    `json:"final_gravity_within_tolerance"`
+	ElapsedDays                 int     `json:"elapsed_days"`
+	MinimumDays                 int     `json:"minimum_days"`
+	MaximumDays                 int     `json:"maximum_days"`
+	DurationStatus              string  `json:"duration_status"`
+	ObservationCount            int     `json:"observation_count"`
+	BoundRevisionWithdrawn      bool    `json:"bound_revision_since_withdrawn"`
+}
+
+const (
+	DurationWithinWindow = "within_expected_window"
+	DurationBeforeWindow = "before_expected_window"
+	DurationAfterWindow  = "after_expected_window"
+)
+
 type FermentationRun struct {
-	ID             string               `json:"id"`
-	Code           string               `json:"code"`
-	FormulaID      string               `json:"formula_id"`
-	VesselID       *string              `json:"vessel_id,omitempty"`
-	PlannedVolumeL float64              `json:"planned_volume_liters"`
-	Notes          string               `json:"notes,omitempty"`
-	State          RunState             `json:"state"`
-	StartedAt      *time.Time           `json:"started_at,omitempty"`
-	EndedAt        *time.Time           `json:"ended_at,omitempty"`
-	Observations   []GravityObservation `json:"observations"`
-	Metrics        *RunMetrics          `json:"metrics,omitempty"`
-	Version        int64                `json:"version"`
-	CreatedAt      time.Time            `json:"created_at"`
-	UpdatedAt      time.Time            `json:"updated_at"`
+	ID        string `json:"id"`
+	Code      string `json:"code"`
+	FormulaID string `json:"formula_id"`
+	// ProcessConfigID is copied from the approved formula at creation so the
+	// linkage survives even if the formula aggregate is later retired.
+	ProcessConfigID string               `json:"process_config_id"`
+	VesselID        *string              `json:"vessel_id,omitempty"`
+	PlannedVolumeL  float64              `json:"planned_volume_liters"`
+	Notes           string               `json:"notes,omitempty"`
+	State           RunState             `json:"state"`
+	StartedAt       *time.Time           `json:"started_at,omitempty"`
+	EndedAt         *time.Time           `json:"ended_at,omitempty"`
+	Observations    []GravityObservation `json:"observations"`
+	Metrics         *RunMetrics          `json:"metrics,omitempty"`
+	ProcessBinding  *RunProcessBinding   `json:"process_binding,omitempty"`
+	ProcessResult   *RunProcessResult    `json:"process_result,omitempty"`
+	Version         int64                `json:"version"`
+	CreatedAt       time.Time            `json:"created_at"`
+	UpdatedAt       time.Time            `json:"updated_at"`
 }
 
 func (r FermentationRun) Clone() FermentationRun {
@@ -48,6 +92,15 @@ func (r FermentationRun) Clone() FermentationRun {
 	if r.Metrics != nil {
 		value := *r.Metrics
 		cloned.Metrics = &value
+	}
+	if r.ProcessBinding != nil {
+		binding := *r.ProcessBinding
+		binding.Candidates = append([]RevisionCandidate(nil), r.ProcessBinding.Candidates...)
+		cloned.ProcessBinding = &binding
+	}
+	if r.ProcessResult != nil {
+		value := *r.ProcessResult
+		cloned.ProcessResult = &value
 	}
 	return cloned
 }
@@ -79,11 +132,24 @@ func (r *FermentationRun) ReserveVessel(vesselID string, now time.Time) error {
 	return nil
 }
 
-func (r *FermentationRun) StartFermentation(now time.Time) error {
+// StartFermentation binds the resolved configuration revision before the run
+// enters fermentation. Every later judgment reads the binding instead of the
+// current configuration catalogue.
+func (r *FermentationRun) StartFermentation(binding RunProcessBinding, now time.Time) error {
 	if r.State != RunReserved || r.VesselID == nil {
 		return NewError(CodeRunState, "only a reserved run can start fermentation")
 	}
+	if binding.ProcessConfigID == "" || binding.Revision < 1 {
+		return NewError(CodeProcessConfigNotEffective,
+			"a run requires an effective process configuration revision at start")
+	}
 	stamp := now.UTC()
+	bound := binding
+	bound.Candidates = append([]RevisionCandidate(nil), binding.Candidates...)
+	bound.ResolvedAt = stamp
+	bound.ExpectedEarliest = stamp.AddDate(0, 0, binding.Profile.MinimumDays)
+	bound.ExpectedLatest = stamp.AddDate(0, 0, binding.Profile.MaximumDays)
+	r.ProcessBinding = &bound
 	r.State = RunFermenting
 	r.StartedAt = &stamp
 	r.UpdatedAt = stamp
@@ -91,9 +157,24 @@ func (r *FermentationRun) StartFermentation(now time.Time) error {
 	return nil
 }
 
+// boundProfile returns the snapshotted profile for a run that has started.
+// Started runs always carry a binding; the defensive default keeps older
+// snapshots loadable without inventing configuration data.
+func (r *FermentationRun) boundProfile() (ProcessProfile, error) {
+	if r.ProcessBinding == nil {
+		return ProcessProfile{}, NewError(CodeProcessConfigNotEffective,
+			"started run has no bound process configuration")
+	}
+	return r.ProcessBinding.Profile, nil
+}
+
 func (r *FermentationRun) AddObservation(observation GravityObservation) error {
 	if r.State != RunFermenting || r.StartedAt == nil {
 		return NewError(CodeRunState, "observations require a fermenting run")
+	}
+	profile, err := r.boundProfile()
+	if err != nil {
+		return err
 	}
 	if len(r.Observations) >= 500 {
 		return NewError(CodeObservationConflict,
@@ -106,6 +187,15 @@ func (r *FermentationRun) AddObservation(observation GravityObservation) error {
 	}
 	if err := ValidateObservation(*r.StartedAt, previous, observation, observation.ReceivedAt); err != nil {
 		return err
+	}
+	if observation.TemperatureC < profile.MinObservationTempC ||
+		observation.TemperatureC > profile.MaxObservationTempC {
+		return FieldError(CodeInvalidInput, "temperature_c",
+			"must stay within the bound process configuration observation temperature band")
+	}
+	if previous != nil && observation.Gravity-previous.Gravity > profile.MaxGravityRise {
+		return NewError(CodeObservationConflict,
+			"gravity rise exceeds the bound process configuration limit")
 	}
 	expected := len(r.Observations) + 1
 	if observation.Sequence != expected {
@@ -123,9 +213,13 @@ func (r *FermentationRun) BeginConditioning(now time.Time) error {
 	if r.State != RunFermenting {
 		return NewError(CodeRunState, "only a fermenting run can enter conditioning")
 	}
-	if len(r.Observations) < 2 {
+	profile, err := r.boundProfile()
+	if err != nil {
+		return err
+	}
+	if len(r.Observations) < profile.MinConditioningObservations {
 		return NewError(CodeRunState,
-			"conditioning requires at least two observations")
+			"conditioning requires the observation minimum defined by the bound process configuration")
 	}
 	r.State = RunConditioning
 	r.UpdatedAt = now.UTC()
@@ -133,18 +227,50 @@ func (r *FermentationRun) BeginConditioning(now time.Time) error {
 	return nil
 }
 
-func (r *FermentationRun) Complete(originalGravity float64, now time.Time) error {
+func (r *FermentationRun) Complete(
+	originalGravity, targetFinalGravity float64,
+	boundRevisionWithdrawn bool,
+	now time.Time,
+) error {
 	if r.State != RunConditioning {
 		return NewError(CodeRunState, "only a conditioning run can be completed")
 	}
-	if len(r.Observations) < 3 {
+	profile, err := r.boundProfile()
+	if err != nil {
+		return err
+	}
+	if len(r.Observations) < profile.MinCompletionObservations {
 		return NewError(CodeRunState,
-			"completion requires at least three observations")
+			"completion requires the observation minimum defined by the bound process configuration")
 	}
 	stamp := now.UTC()
 	final := r.Observations[len(r.Observations)-1]
 	metrics := CalculateMetrics(originalGravity, final.Gravity, len(r.Observations))
 	r.Metrics = &metrics
+
+	difference := final.Gravity - targetFinalGravity
+	if difference < 0 {
+		difference = -difference
+	}
+	elapsedDays := int(stamp.Sub(r.StartedAt.UTC()).Hours() / 24)
+	durationStatus := DurationWithinWindow
+	if elapsedDays < profile.MinimumDays {
+		durationStatus = DurationBeforeWindow
+	} else if elapsedDays > profile.MaximumDays {
+		durationStatus = DurationAfterWindow
+	}
+	r.ProcessResult = &RunProcessResult{
+		FinalGravity:                round2(final.Gravity),
+		TargetFinalGravity:          round2(targetFinalGravity),
+		FinalGravityTolerance:       profile.FinalGravityTolerance,
+		FinalGravityWithinTolerance: difference <= profile.FinalGravityTolerance+1e-9,
+		ElapsedDays:                 elapsedDays,
+		MinimumDays:                 profile.MinimumDays,
+		MaximumDays:                 profile.MaximumDays,
+		DurationStatus:              durationStatus,
+		ObservationCount:            len(r.Observations),
+		BoundRevisionWithdrawn:      boundRevisionWithdrawn,
+	}
 	r.State = RunCompleted
 	r.EndedAt = &stamp
 	r.UpdatedAt = stamp

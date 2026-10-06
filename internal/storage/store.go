@@ -63,6 +63,9 @@ func normalizeSnapshot(value domain.Snapshot) (domain.Snapshot, error) {
 	if value.Formulas == nil {
 		value.Formulas = map[string]domain.Formula{}
 	}
+	if value.ProcessConfigs == nil {
+		value.ProcessConfigs = map[string]domain.ProcessConfig{}
+	}
 	if value.Vessels == nil {
 		value.Vessels = map[string]domain.Vessel{}
 	}
@@ -71,6 +74,9 @@ func normalizeSnapshot(value domain.Snapshot) (domain.Snapshot, error) {
 	}
 	if value.NameIndex == nil {
 		value.NameIndex = map[string]string{}
+	}
+	if value.ProcessConfigIndex == nil {
+		value.ProcessConfigIndex = map[string]string{}
 	}
 	if value.VesselIndex == nil {
 		value.VesselIndex = map[string]string{}
@@ -100,6 +106,57 @@ func validateIndexes(value domain.Snapshot) error {
 		return err
 	}
 
+	expectedConfigs := make(map[string]string, len(value.ProcessConfigs))
+	for id, config := range value.ProcessConfigs {
+		key := domain.NameKey(config.Name)
+		if key == "" {
+			return fmt.Errorf("process config %s has an empty normalized name", id)
+		}
+		if existing, found := expectedConfigs[key]; found && existing != id {
+			return fmt.Errorf("process config index contains a duplicate key")
+		}
+		for index, revision := range config.Revisions {
+			if revision.Revision != int64(index+1) {
+				return fmt.Errorf("process config %s has non-contiguous revision numbers", id)
+			}
+			if err := revision.Profile.Validate(); err != nil {
+				return fmt.Errorf("process config %s revision %d is invalid: %w",
+					id, revision.Revision, err)
+			}
+		}
+		expectedConfigs[key] = id
+	}
+	if err := compareIndexes("process config name", value.ProcessConfigIndex, expectedConfigs); err != nil {
+		return err
+	}
+
+	for id, formula := range value.Formulas {
+		if formula.ProcessConfigID != nil {
+			if _, ok := value.ProcessConfigs[*formula.ProcessConfigID]; !ok {
+				return fmt.Errorf("formula %s references a missing process config", id)
+			}
+		}
+		if (formula.State == domain.FormulaApproved || formula.State == domain.FormulaRetired) &&
+			(formula.ProcessConfigID == nil || *formula.ProcessConfigID == "") {
+			return fmt.Errorf("approved formula %s has no bound process config", id)
+		}
+	}
+
+	for id, run := range value.Runs {
+		if _, ok := value.Formulas[run.FormulaID]; !ok {
+			return fmt.Errorf("run %s references a missing formula", id)
+		}
+		if _, ok := value.ProcessConfigs[run.ProcessConfigID]; !ok {
+			return fmt.Errorf("run %s references a missing process config", id)
+		}
+		if run.ProcessBinding != nil {
+			config, ok := value.ProcessConfigs[run.ProcessBinding.ProcessConfigID]
+			if !ok || run.ProcessBinding.Revision < 1 ||
+				int(run.ProcessBinding.Revision) > len(config.Revisions) {
+				return fmt.Errorf("run %s references a missing bound config revision", id)
+			}
+		}
+	}
 	expectedVessels := make(map[string]string, len(value.Vessels))
 	for id, vessel := range value.Vessels {
 		if existing, found := expectedVessels[vessel.Code]; found && existing != id {

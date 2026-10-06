@@ -71,8 +71,18 @@ Formula workflow:
 - `GET /v1/formulas`
 - `GET /v1/formulas/{id}`
 - `PUT /v1/formulas/{id}/steps`
+- `PUT /v1/formulas/{id}/process-config`
 - `POST /v1/formulas/{id}/approve`
 - `POST /v1/formulas/{id}/retire`
+
+Process configuration workflow:
+
+- `POST /v1/process-configs`
+- `GET /v1/process-configs`
+- `GET /v1/process-configs/{id}`
+- `POST /v1/process-configs/{id}/revisions`
+- `POST /v1/process-configs/{id}/revisions/{revision}/withdraw`
+- `POST /v1/process-configs/{id}/retire`
 
 Vessel workflow:
 
@@ -107,6 +117,36 @@ shape:
 }
 ```
 
+## Versioned Process Configuration
+
+Temperature bands, expected fermentation duration, observation minimums,
+gravity-rise limits, and completion tolerance vary by season and style. They
+are stored as versioned process configuration series rather than oral
+reminders:
+
+1. A planner creates a process configuration series and publishes immutable
+   revisions. Each revision carries a complete threshold profile, an
+   `effective_at` timestamp, and the publishing supervisor.
+2. A draft formula selects one series through
+   `PUT /v1/formulas/{id}/process-config`. Approval is refused without a
+   selected series that has at least one non-withdrawn revision.
+3. When a run starts, the service resolves the **latest non-withdrawn revision
+   whose `effective_at` is at or before the start time**, snapshots the full
+   profile onto the run, and records every other revision as a candidate with
+   a stable reason (`selected`, `superseded`, `not_yet_effective`,
+   `withdrawn`).
+4. Observations, conditioning, completion, and duration checks thereafter use
+   the snapshotted profile. Publishing, withdrawing, or retiring configuration
+   later never rewrites a live, completed, or aborted run.
+5. `GET /v1/runs/{id}` returns a `process_status` block showing the bound
+   revision, whether it has since been withdrawn, whether the series was
+   retired, and a human-readable explanation. Completed runs also carry a
+   `process_result` block with the completion-time evaluation.
+
+A withdrawal only prevents future starts from selecting that revision. If no
+revision is effective at start, the run stays in its current state and the
+start fails with `process_config_not_effective`.
+
 ## Workflow Checks
 
 Run each production workflow check separately:
@@ -115,6 +155,7 @@ Run each production workflow check separately:
 go run ./cmd/fermentctl check formula-approval
 go run ./cmd/fermentctl check vessel-run-lifecycle
 go run ./cmd/fermentctl check observations-completion
+go run ./cmd/fermentctl check process-config-versioning
 ```
 
 Each check creates a temporary snapshot directory, starts the real HTTP

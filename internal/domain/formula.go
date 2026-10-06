@@ -31,17 +31,25 @@ type Formula struct {
 	MinimumDays           int           `json:"minimum_days"`
 	MaximumDays           int           `json:"maximum_days"`
 	Steps                 []FormulaStep `json:"steps"`
-	State                 FormulaState  `json:"state"`
-	Version               int64         `json:"version"`
-	CreatedAt             time.Time     `json:"created_at"`
-	UpdatedAt             time.Time     `json:"updated_at"`
-	ApprovedAt            *time.Time    `json:"approved_at,omitempty"`
-	RetiredAt             *time.Time    `json:"retired_at,omitempty"`
+	// ProcessConfigID identifies the versioned process configuration series
+	// the formula was approved against. It is chosen before approval and
+	// never changes afterwards.
+	ProcessConfigID *string      `json:"process_config_id,omitempty"`
+	State           FormulaState `json:"state"`
+	Version         int64        `json:"version"`
+	CreatedAt       time.Time    `json:"created_at"`
+	UpdatedAt       time.Time    `json:"updated_at"`
+	ApprovedAt      *time.Time   `json:"approved_at,omitempty"`
+	RetiredAt       *time.Time   `json:"retired_at,omitempty"`
 }
 
 func (f Formula) Clone() Formula {
 	cloned := f
 	cloned.Steps = append([]FormulaStep(nil), f.Steps...)
+	if f.ProcessConfigID != nil {
+		value := *f.ProcessConfigID
+		cloned.ProcessConfigID = &value
+	}
 	return cloned
 }
 
@@ -143,12 +151,31 @@ func (f *Formula) SetSteps(steps []FormulaStep) error {
 	return nil
 }
 
+func (f *Formula) SelectProcessConfig(configID string) error {
+	if f.State != FormulaDraft {
+		return NewError(CodeFormulaState,
+			"only a draft formula can select a process configuration")
+	}
+	if strings.TrimSpace(configID) == "" {
+		return FieldError(CodeInvalidInput, "process_config_id", "is required")
+	}
+	value := strings.TrimSpace(configID)
+	f.ProcessConfigID = &value
+	f.UpdatedAt = time.Now().UTC()
+	f.Version++
+	return nil
+}
+
 func (f *Formula) Approve(now time.Time) error {
 	if f.State != FormulaDraft {
 		return NewError(CodeFormulaState, "only a draft formula can be approved")
 	}
 	if err := ValidateFormulaSteps(f.Steps, true); err != nil {
 		return err
+	}
+	if f.ProcessConfigID == nil || *f.ProcessConfigID == "" {
+		return NewError(CodeProcessConfigUnbound,
+			"a draft formula must select a process configuration before approval")
 	}
 	stamp := now.UTC()
 	f.State = FormulaApproved

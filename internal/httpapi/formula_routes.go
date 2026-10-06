@@ -21,6 +21,10 @@ type setStepsRequest struct {
 	Steps []domain.FormulaStep `json:"steps"`
 }
 
+type bindProcessConfigRequest struct {
+	ProcessConfigID string `json:"process_config_id"`
+}
+
 func registerFormulaRoutes(mux *http.ServeMux, app *service.Service) {
 	mux.HandleFunc("POST /v1/formulas", func(response http.ResponseWriter, request *http.Request) {
 		body, err := decodeJSON[createFormulaRequest](response, request)
@@ -72,6 +76,27 @@ func registerFormulaRoutes(mux *http.ServeMux, app *service.Service) {
 		}
 		formula, err := app.SetFormulaSteps(request.PathValue("id"),
 			service.SetFormulaStepsInput{ExpectedVersion: expected, Steps: body.Steps})
+		if err != nil {
+			writeDomainError(response, err)
+			return
+		}
+		writeJSON(response, http.StatusOK, formula)
+	})
+
+	mux.HandleFunc("PUT /v1/formulas/{id}/process-config", func(response http.ResponseWriter, request *http.Request) {
+		body, err := decodeJSON[bindProcessConfigRequest](response, request)
+		if !handleDecode(response, err) {
+			return
+		}
+		expected, err := expectedVersion(request)
+		if !handleDecode(response, err) {
+			return
+		}
+		formula, err := app.BindFormulaProcessConfig(request.PathValue("id"),
+			service.BindFormulaConfigInput{
+				ExpectedVersion: expected,
+				ProcessConfigID: body.ProcessConfigID,
+			})
 		if err != nil {
 			writeDomainError(response, err)
 			return
