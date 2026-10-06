@@ -71,8 +71,28 @@ Formula workflow:
 - `GET /v1/formulas`
 - `GET /v1/formulas/{id}`
 - `PUT /v1/formulas/{id}/steps`
+- `PUT /v1/formulas/{id}/profile`
 - `POST /v1/formulas/{id}/approve`
 - `POST /v1/formulas/{id}/retire`
+
+Process profile workflow:
+
+- `POST /v1/profiles`
+- `GET /v1/profiles`
+- `GET /v1/profiles/{id}`
+- `POST /v1/profiles/{id}/versions`
+- `POST /v1/profiles/{id}/versions/{version}/withdraw`
+
+A process profile is a versioned family of cellar standards: fermentation
+temperature band, expected fermentation days, and observation thresholds for
+conditioning and completion. Published versions are immutable; corrections
+are published as new versions, and withdrawing a version only blocks new
+bindings. A draft formula selects one family before approval. Starting a run
+pins the version effective at that moment and snapshots its expectations
+onto the run, so conditioning and completion keep judging by the bound
+version even if a newer version becomes effective or the bound version is
+withdrawn mid-run. Each run records its binding, decision trail, and
+completion assessment.
 
 Vessel workflow:
 
@@ -115,6 +135,7 @@ Run each production workflow check separately:
 go run ./cmd/fermentctl check formula-approval
 go run ./cmd/fermentctl check vessel-run-lifecycle
 go run ./cmd/fermentctl check observations-completion
+go run ./cmd/fermentctl check profile-binding
 ```
 
 Each check creates a temporary snapshot directory, starts the real HTTP

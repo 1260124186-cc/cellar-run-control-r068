@@ -48,8 +48,15 @@ func (s *Service) BeginConditioning(
 		if err := s.checkExpected(run.Version, input.ExpectedVersion); err != nil {
 			return err
 		}
-		if err := run.BeginConditioning(s.clock.Now()); err != nil {
+		now := s.clock.Now()
+		if err := run.BeginConditioning(now); err != nil {
 			return err
+		}
+		if run.ProfileBinding != nil {
+			if profile, ok := snapshot.Profiles[run.ProfileBinding.ProfileID]; ok {
+				run.RecordProfileDecision(domain.ProfileDecisionReusedAtConditioning,
+					profileContextReason(profile, run.ProfileBinding.Version, now), now)
+			}
 		}
 		snapshot.Runs[id] = run.Clone()
 		updated = run.Clone()
@@ -79,8 +86,15 @@ func (s *Service) CompleteRun(
 		if !ok {
 			return domain.NewError(domain.CodeFormulaNotFound, "attached formula was not found")
 		}
-		if err := run.Complete(formula.TargetOriginalGravity, s.clock.Now()); err != nil {
+		now := s.clock.Now()
+		if err := run.Complete(formula.TargetOriginalGravity, now); err != nil {
 			return err
+		}
+		if run.ProfileBinding != nil {
+			if profile, ok := snapshot.Profiles[run.ProfileBinding.ProfileID]; ok {
+				run.RecordProfileDecision(domain.ProfileDecisionReusedAtCompletion,
+					profileContextReason(profile, run.ProfileBinding.Version, now), now)
+			}
 		}
 		if run.VesselID == nil {
 			return domain.NewError(domain.CodeRunState, "run has no vessel")
@@ -89,7 +103,7 @@ func (s *Service) CompleteRun(
 		if !ok {
 			return domain.NewError(domain.CodeVesselNotFound, "vessel was not found")
 		}
-		if err := vessel.StartCleaning(run.ID, s.clock.Now()); err != nil {
+		if err := vessel.StartCleaning(run.ID, now); err != nil {
 			return err
 		}
 		snapshot.Runs[id] = run.Clone()

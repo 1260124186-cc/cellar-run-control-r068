@@ -126,6 +126,11 @@ func observationsCompletion(api *client) error {
 		completed.Run.Metrics.EstimatedAlcoholABV <= 0 {
 		return errInvalidWorkflow("completion metrics were not calculated")
 	}
+	if completed.Run.Assessment == nil ||
+		completed.Run.Assessment.ProfileVersion != 1 ||
+		completed.Run.Assessment.Outcome != domain.AssessmentWithinExpectations {
+		return errInvalidWorkflow("completion assessment did not use the bound profile version")
+	}
 
 	repeatResponse, err := api.call("POST", "/v1/runs/"+started.Run.ID+"/complete",
 		nil, ptrInt64(completed.Run.Version))

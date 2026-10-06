@@ -17,15 +17,16 @@ func (s *Service) CreateRun(input CreateRunInput) (domain.FermentationRun, error
 		code = generated
 	}
 	run := domain.FermentationRun{
-		Code:           code,
-		FormulaID:      input.FormulaID,
-		PlannedVolumeL: input.PlannedVolumeL,
-		Notes:          input.Notes,
-		State:          domain.RunPlanned,
-		Observations:   []domain.GravityObservation{},
-		Version:        1,
-		CreatedAt:      now,
-		UpdatedAt:      now,
+		Code:             code,
+		FormulaID:        input.FormulaID,
+		PlannedVolumeL:   input.PlannedVolumeL,
+		Notes:            input.Notes,
+		State:            domain.RunPlanned,
+		Observations:     []domain.GravityObservation{},
+		ProfileDecisions: []domain.ProfileDecision{},
+		Version:          1,
+		CreatedAt:        now,
+		UpdatedAt:        now,
 	}
 	if err := run.Validate(); err != nil {
 		return domain.FermentationRun{}, err
@@ -120,11 +121,44 @@ func (s *Service) StartRun(
 		if !ok {
 			return domain.NewError(domain.CodeVesselNotFound, "vessel was not found")
 		}
-		if err := vessel.StartRun(run.ID, s.clock.Now()); err != nil {
+		now := s.clock.Now()
+		formula, ok := snapshot.Formulas[run.FormulaID]
+		if !ok {
+			return domain.NewError(domain.CodeFormulaNotFound,
+				"attached formula was not found")
+		}
+		var binding *domain.ProfileBinding
+		if formula.ProfileID != "" {
+			profile, ok := snapshot.Profiles[formula.ProfileID]
+			if !ok {
+				return domain.NewError(domain.CodeProfileNotFound,
+					"attached process profile was not found")
+			}
+			resolved, ok := profile.ResolveBindable(now)
+			if !ok {
+				return domain.NewError(domain.CodeProfileNotBindable,
+					"no published process profile version is effective at run start")
+			}
+			binding = &domain.ProfileBinding{
+				ProfileID:    profile.ID,
+				ProfileName:  profile.Name,
+				Version:      resolved.Version,
+				Expectations: resolved.Expectations,
+				Decision:     domain.ProfileDecisionBoundAtStart,
+				Reason:       bindReason(profile, resolved, now),
+				BoundAt:      now.UTC(),
+			}
+		}
+		if err := vessel.StartRun(run.ID, now); err != nil {
 			return err
 		}
-		if err := run.StartFermentation(s.clock.Now()); err != nil {
+		if err := run.StartFermentation(now); err != nil {
 			return err
+		}
+		if binding != nil {
+			if err := run.BindProfile(*binding, now); err != nil {
+				return err
+			}
 		}
 		snapshot.Runs[id] = run.Clone()
 		snapshot.Vessels[vessel.ID] = vessel

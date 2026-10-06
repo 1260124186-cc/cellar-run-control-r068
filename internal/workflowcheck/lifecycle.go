@@ -97,6 +97,13 @@ func vesselRunLifecycle(api *client) error {
 	if pair.Run.VesselID == nil || *pair.Run.VesselID != vessel.ID {
 		return errInvalidWorkflow("run did not retain its reserved vessel")
 	}
+	if pair.Run.ProfileBinding == nil || pair.Run.ProfileBinding.Version != 1 {
+		return errInvalidWorkflow("started run did not bind the effective profile version")
+	}
+	if len(pair.Run.ProfileDecisions) == 0 ||
+		pair.Run.ProfileDecisions[0].Event != string(domain.ProfileDecisionBoundAtStart) {
+		return errInvalidWorkflow("started run did not record its binding decision")
+	}
 
 	readResponse, err := api.call("GET", "/v1/runs/"+first.ID, nil, nil)
 	if err != nil {

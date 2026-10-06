@@ -23,6 +23,12 @@ const (
 	CodeObservationConflict Code = "observation_conflict"
 	CodeRevisionConflict    Code = "revision_conflict"
 	CodeStorage             Code = "storage_error"
+
+	CodeProfileNotFound        Code = "profile_not_found"
+	CodeProfileNameConflict    Code = "profile_name_conflict"
+	CodeProfileState           Code = "invalid_profile_state"
+	CodeProfileVersionNotFound Code = "profile_version_not_found"
+	CodeProfileNotBindable     Code = "profile_not_bindable"
 )
 
 type Error struct {

@@ -21,6 +21,24 @@ type SetFormulaStepsInput struct {
 	Steps           []domain.FormulaStep
 }
 
+type SelectFormulaProfileInput struct {
+	ExpectedVersion *int64
+	ProfileID       string
+}
+
+type CreateProfileInput struct {
+	Name   string
+	Season string
+	Style  string
+}
+
+type PublishProfileVersionInput struct {
+	ExpectedVersion *int64
+	Expectations    domain.ProfileExpectations
+	EffectiveFrom   time.Time
+	Note            string
+}
+
 type VersionInput struct {
 	ExpectedVersion *int64
 }

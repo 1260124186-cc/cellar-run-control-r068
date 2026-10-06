@@ -14,6 +14,8 @@ deferred to a later engineering task.
 
 - Production planner: creates formulas, updates process steps, and approves a
   formula before it can be used.
+- Cellar supervisor: publishes and withdraws versioned process profiles that
+  carry the cellar standard for a season and style.
 - Cellar operator: registers vessels, creates runs, reserves a vessel, and
   starts fermentation.
 - Fermentation observer: appends timestamped gravity observations and moves a
@@ -41,9 +43,32 @@ States are `draft`, `approved`, and `retired`.
 - Step sequence values must be contiguous and start at 1.
 - Step temperatures are in the inclusive range 5 to 90 Celsius.
 - Step hold times are 1 to 1440 minutes.
-- `draft -> approved` requires a complete valid step list.
+- `draft -> approved` requires a complete valid step list and a selected
+  process profile whose family holds at least one published, non-withdrawn
+  version.
 - An approved formula is immutable.
 - `approved -> retired` is allowed only when no run currently uses it.
+
+### CellarProfile
+
+A process profile is a versioned family of cellar standards. A family
+contains an identifier, a normalized unique name, season and style labels,
+ordered published versions, an aggregate version, and timestamps.
+
+Each version carries the expected fermentation temperature band, minimum and
+maximum fermentation days, observation thresholds for conditioning and
+completion, an effective-from timestamp, a note, and a lifecycle state of
+`published` or `withdrawn`.
+
+- Versions are numbered sequentially within the family and are immutable
+  once published; corrections require publishing a new version.
+- A zero effective-from timestamp means the version is effective immediately.
+- Withdrawing a version blocks new bindings but never rewrites runs that
+  already bound it.
+- The bindable version at a moment is the highest published, non-withdrawn
+  version whose effective-from time has passed.
+- Concurrent publishes coordinate through the family aggregate version; a
+  stale publisher receives `revision_conflict` and must rebase.
 
 ### Vessel
 
@@ -74,10 +99,21 @@ and `aborted`.
 - Only an approved formula may be attached to a run.
 - `planned -> reserved` atomically reserves an available vessel.
 - `reserved -> fermenting` requires that the vessel still belongs to the run.
-- `fermenting -> conditioning` requires at least two observations.
-- `conditioning -> completed` requires at least three observations.
+- Starting fermentation binds the profile version that is bindable at that
+  moment for the formula's selected family and snapshots its expectations
+  onto the run. A start without a bindable version fails.
+- `fermenting -> conditioning` requires at least as many observations as the
+  bound profile version demands (two for runs without a binding).
+- `conditioning -> completed` requires at least as many observations as the
+  bound profile version demands (three for runs without a binding).
+- Conditioning and completion keep using the bound version even if a newer
+  version becomes effective or the bound version is withdrawn mid-run.
 - Completion computes apparent attenuation and estimated alcohol by volume from
   the formula target original gravity and the last observation.
+- Completion records an assessment of fermentation duration and observed
+  temperatures against the bound expectations.
+- Each run records profile decisions (bind at start, reuse at conditioning,
+  reuse at completion) with reasons, so the adopted version stays auditable.
 - Completion moves the vessel to cleaning without losing its run association.
 - A non-completed run can be aborted. Aborting before fermentation releases an
   available vessel; aborting after fermentation schedules the vessel for
@@ -105,15 +141,38 @@ Public entry points are:
 
 - `POST /v1/formulas`
 - `PUT /v1/formulas/{id}/steps`
+- `PUT /v1/formulas/{id}/profile`
 - `POST /v1/formulas/{id}/approve`
 - `GET /v1/formulas/{id}`
 
-The client creates a draft, sets its process step list atomically, approves it,
-and reads the approved record. Invalid ranges, duplicate names, empty steps,
-and repeated approval return stable error codes without partial writes.
+The client creates a draft, sets its process step list atomically, selects a
+process profile family, approves it, and reads the approved record. Invalid
+ranges, duplicate names, empty steps, a missing or unusable profile
+selection, and repeated approval return stable error codes without partial
+writes.
 
 This path crosses HTTP protocol handling, application orchestration, domain
 rules, and snapshot storage.
+
+### 4. Process Profile Publishing And Binding
+
+Public entry points are:
+
+- `POST /v1/profiles`
+- `POST /v1/profiles/{id}/versions`
+- `POST /v1/profiles/{id}/versions/{version}/withdraw`
+- `POST /v1/runs/{id}/start`
+- `GET /v1/runs/{id}`
+
+The client creates a profile family, publishes immutable versions, withdraws
+superseded versions, and starts runs that pin the version effective at start
+time. Simultaneous publishes conflict on the family version, withdrawn
+versions stop new bindings without touching bound runs, and a version that
+becomes effective mid-run never replaces the pinned one. Each run exposes
+its binding, decision trail, and completion assessment.
+
+This path crosses HTTP protocol handling, application orchestration,
+versioned domain rules, optimistic concurrency, and snapshot storage.
 
 ### 2. Vessel Run Lifecycle
 
@@ -210,13 +269,14 @@ task owns systematic tests for validation boundaries, state transitions,
 numeric calculations, stale revisions, storage failures, and concurrent
 reservation attempts.
 
-The current build command is `go build ./...`. Three bounded production checks
+The current build command is `go build ./...`. Four bounded production checks
 start the real HTTP handler, issue real JSON requests, check success and failure
 behavior, and exit without external services:
 
 - `go run ./cmd/fermentctl check formula-approval`
 - `go run ./cmd/fermentctl check vessel-run-lifecycle`
 - `go run ./cmd/fermentctl check observations-completion`
+- `go run ./cmd/fermentctl check profile-binding`
 
 ## Scope Limits
 

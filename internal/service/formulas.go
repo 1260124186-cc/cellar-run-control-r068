@@ -2,6 +2,7 @@ package service
 
 import (
 	"sort"
+	"strings"
 	"time"
 
 	"github.com/1260124186-cc/solo-0016-cellar-run-control/internal/domain"
@@ -76,6 +77,39 @@ func (s *Service) SetFormulaSteps(
 	return updated, nil
 }
 
+func (s *Service) SelectFormulaProfile(
+	id string,
+	input SelectFormulaProfileInput,
+) (domain.Formula, error) {
+	var updated domain.Formula
+	err := s.store.Execute(func(snapshot *domain.Snapshot) error {
+		formula, ok := snapshot.Formulas[id]
+		if !ok {
+			return domain.NewError(domain.CodeFormulaNotFound, "formula was not found")
+		}
+		if err := s.checkExpected(formula.Version, input.ExpectedVersion); err != nil {
+			return err
+		}
+		if strings.TrimSpace(input.ProfileID) == "" {
+			return domain.FieldError(domain.CodeInvalidInput, "profile_id", "is required")
+		}
+		if _, ok := snapshot.Profiles[input.ProfileID]; !ok {
+			return domain.NewError(domain.CodeProfileNotFound,
+				"process profile was not found")
+		}
+		if err := formula.SelectProfile(input.ProfileID, s.clock.Now()); err != nil {
+			return err
+		}
+		snapshot.Formulas[id] = formula
+		updated = formula.Clone()
+		return nil
+	})
+	if err != nil {
+		return domain.Formula{}, err
+	}
+	return updated, nil
+}
+
 func (s *Service) ApproveFormula(id string, input VersionInput) (domain.Formula, error) {
 	var updated domain.Formula
 	err := s.store.Execute(func(snapshot *domain.Snapshot) error {
@@ -85,6 +119,17 @@ func (s *Service) ApproveFormula(id string, input VersionInput) (domain.Formula,
 		}
 		if err := s.checkExpected(formula.Version, input.ExpectedVersion); err != nil {
 			return err
+		}
+		if formula.ProfileID != "" {
+			profile, ok := snapshot.Profiles[formula.ProfileID]
+			if !ok {
+				return domain.NewError(domain.CodeProfileNotFound,
+					"selected process profile was not found")
+			}
+			if !profile.HasUsableVersion() {
+				return domain.NewError(domain.CodeProfileNotBindable,
+					"selected process profile has no published version available for binding")
+			}
 		}
 		if err := formula.Approve(s.clock.Now()); err != nil {
 			return err

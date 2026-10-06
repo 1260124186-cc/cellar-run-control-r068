@@ -25,6 +25,7 @@ type Formula struct {
 	ID                    string        `json:"id"`
 	Name                  string        `json:"name"`
 	Style                 string        `json:"style"`
+	ProfileID             string        `json:"profile_id,omitempty"`
 	TargetOriginalGravity float64       `json:"target_original_gravity"`
 	TargetFinalGravity    float64       `json:"target_final_gravity"`
 	MaxFermentationTempC  float64       `json:"max_fermentation_temp_c"`
@@ -143,12 +144,30 @@ func (f *Formula) SetSteps(steps []FormulaStep) error {
 	return nil
 }
 
+func (f *Formula) SelectProfile(profileID string, now time.Time) error {
+	if f.State != FormulaDraft {
+		return NewError(CodeFormulaState,
+			"only a draft formula can change its process profile")
+	}
+	if strings.TrimSpace(profileID) == "" {
+		return FieldError(CodeInvalidInput, "profile_id", "is required")
+	}
+	f.ProfileID = profileID
+	f.UpdatedAt = now.UTC()
+	f.Version++
+	return nil
+}
+
 func (f *Formula) Approve(now time.Time) error {
 	if f.State != FormulaDraft {
 		return NewError(CodeFormulaState, "only a draft formula can be approved")
 	}
 	if err := ValidateFormulaSteps(f.Steps, true); err != nil {
 		return err
+	}
+	if f.ProfileID == "" {
+		return FieldError(CodeInvalidInput, "profile_id",
+			"must be selected before approval")
 	}
 	stamp := now.UTC()
 	f.State = FormulaApproved
